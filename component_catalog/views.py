@@ -306,7 +306,21 @@ class TabVulnerabilityMixin:
         reference_urls_joined = "\n".join(reference_urls)
         reference_ids_joined = "\n".join(reference_ids)
 
+        vulnerability_id = vulnerability.get("vulnerability_id") or ""
+        vulnerability_url_tag = None
+        if vulnerability_id:
+            vulnerablecode_url_ds = dataspace.get_configuration().vulnerablecode_url
+            vulnerability_url = vulnerablecode_url_ds + "vulnerabilities/" + vulnerability_id
+            vulnerability_url_tag = format_html(
+                f'<a href="{vulnerability_url}" target="_blank">{vulnerability_id}</a>'
+            )
+
         tab_fields = [
+            (
+                _("Vulnerability URL"),
+                vulnerability_url_tag,
+                "The URL of the Vulnerability",
+            ),
             (_("Summary"), summary, "Summary of the vulnerability"),
         ]
 
