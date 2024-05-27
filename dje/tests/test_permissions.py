@@ -141,6 +141,7 @@ class DejaCodePermissionTestCase(TestCase):
                 "activity",
                 "imports",
                 "history",
+                "vex",
             ],
         }
 
