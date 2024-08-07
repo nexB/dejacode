@@ -64,6 +64,7 @@ from dje.models import DataspacedModel
 from dje.models import DataspacedQuerySet
 from dje.models import ExternalReferenceMixin
 from dje.models import History
+from dje.models import HistoryDateFieldsMixin
 from dje.models import HistoryFieldsMixin
 from dje.models import ParentChildModelMixin
 from dje.models import ParentChildRelationshipModel
@@ -127,6 +128,18 @@ def validate_filename(value):
         raise ValidationError(
             _("Enter a valid filename: slash, backslash, or colon are not allowed.")
         )
+
+
+class VulnerabilityQuerySetMixin:
+    def with_vulnerability_count(self):
+        """Annotate the QuerySet with the vulnerability_count."""
+        return self.annotate(
+            vulnerability_count=models.Count("affected_by_vulnerabilities", distinct=True)
+        )
+
+    def with_vulnerabilties(self):
+        """Return vulnerable Packages."""
+        return self.with_vulnerability_count().filter(vulnerability_count__gt=0)
 
 
 class LicenseExpressionMixin:
@@ -852,7 +865,7 @@ def component_mixin_factory(verbose_name):
 BaseComponentMixin = component_mixin_factory("component")
 
 
-class ComponentQuerySet(DataspacedQuerySet):
+class ComponentQuerySet(VulnerabilityQuerySetMixin, DataspacedQuerySet):
     def with_has_hierarchy(self):
         subcomponents = Subcomponent.objects.filter(
             models.Q(child_id=OuterRef("pk")) | models.Q(parent_id=OuterRef("pk"))
@@ -1622,7 +1635,11 @@ class ComponentKeyword(DataspacedModel):
 PACKAGE_URL_FIELDS = ["type", "namespace", "name", "version", "qualifiers", "subpath"]
 
 
-class PackageQuerySet(PackageURLQuerySetMixin, DataspacedQuerySet):
+class PackageQuerySet(PackageURLQuerySetMixin, VulnerabilityQuerySetMixin, DataspacedQuerySet):
+    def has_package_url(self):
+        """Return objects with Package URL defined."""
+        return self.filter(~models.Q(type="") & ~models.Q(name=""))
+
     def annotate_sortable_identifier(self):
         """
         Annotate the QuerySet with a `sortable_identifier` value that combines
@@ -2454,6 +2471,10 @@ class Package(
             if packages_data:
                 return packages_data
 
+    @property
+    def is_vulnerable(self):
+        return self.affected_by_vulnerabilities.exists()
+
 
 class PackageAssignedLicense(DataspacedModel):
     package = models.ForeignKey(
@@ -2492,3 +2513,102 @@ class ComponentAssignedPackage(DataspacedModel):
 
     def __str__(self):
         return f"<{self.component}>: {self.package}"
+
+
+class Vulnerability(HistoryDateFieldsMixin, DataspacedModel):
+    """
+    A software vulnerability with a unique identifier and alternate aliases.
+
+    Adapted from the VulnerabeCode models at
+    https://github.com/nexB/vulnerablecode/blob/main/vulnerabilities/models.py#L164
+
+    Note that this model implements the HistoryDateFieldsMixin but not the
+    HistoryUserFieldsMixin as the Vulnerability records are usually created
+    automatically on object addition or during schedule tasks.
+    """
+
+    vulnerability_id = models.CharField(
+        unique=True,
+        max_length=20,
+        help_text=_(
+            "A unique identifier for the vulnerability, prefixed with 'VCID-'. "
+            "For example, 'VCID-2024-0001'."
+        ),
+    )
+    summary = models.TextField(
+        help_text=_("A brief summary of the vulnerability, outlining its nature and impact."),
+        blank=True,
+    )
+    aliases = JSONListField(
+        blank=True,
+        help_text=_(
+            "A list of aliases for this vulnerability, such as CVE identifiers "
+            "(e.g., 'CVE-2017-1000136')."
+        ),
+    )
+    references = JSONListField(
+        blank=True,
+        help_text=_(
+            "A list of references for this vulnerability. Each reference includes a "
+            "URL, an optional reference ID, scores, and the URL for further details. "
+        ),
+    )
+    fixed_packages = JSONListField(
+        blank=True,
+        help_text=_("A list of packages that are not affected by this vulnerability."),
+    )
+    affected_packages = models.ManyToManyField(
+        to="component_catalog.Package",
+        related_name="affected_by_vulnerabilities",
+        help_text=_("Packages affected by this vulnerability."),
+    )
+    affected_components = models.ManyToManyField(
+        to="component_catalog.Component",
+        related_name="affected_by_vulnerabilities",
+        help_text=_("Components affected by this vulnerability."),
+    )
+
+    class Meta:
+        verbose_name_plural = "Vulnerabilities"
+        unique_together = (("dataspace", "vulnerability_id"), ("dataspace", "uuid"))
+
+    def __str__(self):
+        return self.vulnerability_id
+
+    @property
+    def vcid(self):
+        return self.vulnerability_id
+
+    def add_affected_packages(self, packages):
+        """Assign the ``packages`` as affected to this vulnerability."""
+        self.affected_packages.add(*packages)
+
+    def add_affected_components(self, components):
+        """Assign the ``components`` as affected to this vulnerability."""
+        self.affected_components.add(*components)
+
+    @classmethod
+    def create_from_data(
+        cls, dataspace, data, validate=False, affected_packages=None, affected_components=None
+    ):
+        # TODO: Remove duplication with super()
+        model_fields = cls.model_fields()
+        cleaned_data = {
+            field_name: value
+            for field_name, value in data.items()
+            if field_name in model_fields and value not in EMPTY_VALUES
+        }
+
+        instance = cls(dataspace=dataspace, **cleaned_data)
+
+        if validate:
+            instance.full_clean()
+        instance.save()
+
+        if affected_packages:
+            instance.add_affected_packages(affected_packages)
+
+        if affected_components:
+            instance.add_affected_component(affected_components)
+
+        return instance
