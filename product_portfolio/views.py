@@ -553,8 +553,10 @@ class ProductDetailsView(
         user = self.request.user
         dataspace = user.dataspace
 
-        if user.is_authenticated:
-            self.object.mark_all_notifications_as_read(user)
+        # This behavior does not works well in the context of getting informed about
+        # tasks completion on the Product.
+        # if user.is_authenticated:
+        #     self.object.mark_all_notifications_as_read(user)
 
         context = super().get_context_data(**kwargs)
 
@@ -2247,3 +2249,34 @@ def scancodeio_project_status_view(request, scancodeproject_uuid):
     }
 
     return TemplateResponse(request, template, context)
+
+
+@login_required
+def improve_packages_from_purldb_view(request, dataspace, name, version=""):
+    user = request.user
+
+    purldb = PurlDB(user.dataspace)
+    conditions = [
+        purldb.is_configured(),
+        user.is_superuser,
+        user.dataspace.enable_purldb_access,
+        user.dataspace.name == dataspace,
+    ]
+
+    if not all(conditions):
+        raise Http404
+
+    guarded_qs = Product.objects.get_queryset(user)
+    product = get_object_or_404(guarded_qs, name=unquote_plus(name), version=unquote_plus(version))
+
+    if not product.packages.count():
+        raise Http404("No packages available for this product.")
+
+    transaction.on_commit(
+        lambda: tasks.improve_packages_from_purldb(
+            product_uuid=product.uuid,
+            user_uuid=user.uuid,
+        )
+    )
+    messages.success(request, "Improve Packages from PurlDB in progress...")
+    return redirect(product)
